@@ -34,6 +34,6 @@ android {
 }
 
 dependencies {
-    implementation("com.github.singbox-android:libbox:1.14.0")
+    implementation(files("libs/libbox.aar"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 }
