@@ -20,6 +20,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.net.HttpURLConnection
+import java.net.InetAddress
 import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -222,18 +223,22 @@ class VPNService : VpnService(), CommandServerHandler {
         val mtu = options.mtu.coerceIn(1280, 9000)
         val builder = Builder().setSession("AliVPN").setMtu(mtu)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
+
         val inet4 = options.inet4Address
         while (inet4.hasNext()) {
             val address = inet4.next()
             builder.addAddress(address.address(), address.prefix())
         }
+
         val inet6 = options.inet6Address
         while (inet6.hasNext()) {
             val address = inet6.next()
             builder.addAddress(address.address(), address.prefix())
         }
+
         if (options.autoRoute) {
-            builder.addDnsServer(options.dnsServerAddress.value)
+            builder.addDnsServer(options.dnsServerAddress)
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val r4 = options.inet4RouteAddress
                 var addedV4Route = false
@@ -253,12 +258,15 @@ class VPNService : VpnService(), CommandServerHandler {
                 val e4 = options.inet4RouteExcludeAddress
                 while (e4.hasNext()) {
                     val route = e4.next()
-                    builder.excludeRoute(route.address(), route.prefix())
+                    val prefix = android.net.IpPrefix(InetAddress.getByName(route.address()), route.prefix())
+                    builder.excludeRoute(prefix)
                 }
+
                 val e6 = options.inet6RouteExcludeAddress
                 while (e6.hasNext()) {
                     val route = e6.next()
-                    builder.excludeRoute(route.address(), route.prefix())
+                    val prefix = android.net.IpPrefix(InetAddress.getByName(route.address()), route.prefix())
+                    builder.excludeRoute(prefix)
                 }
             } else {
                 val r4 = options.inet4RouteRange
@@ -266,6 +274,7 @@ class VPNService : VpnService(), CommandServerHandler {
                     val p = r4.next()
                     builder.addRoute(p.address(), p.prefix())
                 } else builder.addRoute("0.0.0.0", 0)
+
                 val r6 = options.inet6RouteRange
                 while (r6.hasNext()) {
                     val p = r6.next()
@@ -273,10 +282,12 @@ class VPNService : VpnService(), CommandServerHandler {
                 }
             }
         }
+
         val include = options.includePackage
         while (include.hasNext()) runCatching { builder.addAllowedApplication(include.next()) }
         val exclude = options.excludePackage
         while (exclude.hasNext()) runCatching { builder.addDisallowedApplication(exclude.next()) }
+
         val pfd = builder.establish() ?: error("android: VPN establish failed")
         tunPfd?.close()
         tunPfd = pfd
