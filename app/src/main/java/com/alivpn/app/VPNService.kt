@@ -12,7 +12,13 @@ import io.nekohasekai.libbox.Notification
 import io.nekohasekai.libbox.OverrideOptions
 import io.nekohasekai.libbox.SystemProxyStatus
 import io.nekohasekai.libbox.TunOptions
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.URL
@@ -27,6 +33,7 @@ class VPNService : VpnService(), CommandServerHandler {
         const val EXTRA_DETAIL = "detail"
         private const val TAG = "AliVPN-Service"
         private const val EXTRA_CANDIDATES_PATH = "candidates_path"
+        private const val CONNECT_TIMEOUT_MS = 30_000L
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -36,14 +43,15 @@ class VPNService : VpnService(), CommandServerHandler {
     private val running = AtomicBoolean(false)
     private var candidates = emptyList<String>()
     private var lastConnectedNode = ""
-
     private val platform = object : PlatformInterfaceWrapper(this) {}
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NotificationHelper.ID, NotificationHelper.build(this, "AliVPN", "Запуск VPN…"))
         if (running.compareAndSet(false, true)) {
             candidates = runCatching {
-                intent?.getStringExtra(EXTRA_CANDIDATES_PATH)?.let { java.io.File(it).readLines().filter(String::isNotBlank) }.orEmpty()
+                intent?.getStringExtra(EXTRA_CANDIDATES_PATH)?.let {
+                    java.io.File(it).readLines().filter(String::isNotBlank)
+                }.orEmpty()
             }.getOrDefault(emptyList())
             scope.launch { startCore() }
         }
@@ -63,7 +71,8 @@ class VPNService : VpnService(), CommandServerHandler {
             if (valid.isEmpty()) error("Все узлы имеют ошибку конфигурации")
             candidates = valid
             val server = commandServer ?: CommandServer(this, platform).also {
-                it.start(); commandServer = it
+                it.start()
+                commandServer = it
             }
             connectBest(server)
         } catch (t: Throwable) {
@@ -76,21 +85,28 @@ class VPNService : VpnService(), CommandServerHandler {
         var lastError = "неизвестная ошибка"
         for ((index, uri) in candidates.withIndex()) {
             if (!scope.isActive || !running.get()) return
-            val name = runCatching { UriNodeParser.parse(uri)?.name ?: "Node ${index + 1}" }.getOrDefault("Node ${index + 1}")
+            val name = runCatching {
+                UriNodeParser.parse(uri)?.name ?: "Node ${index + 1}"
+            }.getOrDefault("Node ${index + 1}")
             broadcast(AppState.CONNECTING, node = name, detail = "Проверка узла ${index + 1}/${candidates.size}")
             updateNotification("Проверка узла ${index + 1}/${candidates.size}", name)
             try {
                 val config = SingBoxConfig.build(uri)
                 io.nekohasekai.libbox.Libbox.checkConfig(config)
                 server.startOrReloadService(config, OverrideOptions().also { it.autoRedirect = false })
-                delay(4_000)
+
+                // A syntactically valid config is not a live connection. Do not
+                // publish CONNECTED until traffic through the tunnel succeeds.
+                val ip = awaitExternalIp(CONNECT_TIMEOUT_MS)
+                if (ip.isBlank()) error("Узел не пропускает трафик")
+
                 lastConnectedNode = name
-                getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit().putString(AppState.LAST_URI, uri).apply()
-                broadcast(AppState.CONNECTED, node = name, detail = "Tunnel запущен")
-                updateNotification("VPN подключён", name)
+                getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit()
+                    .putString(AppState.LAST_URI, uri).apply()
+                broadcast(AppState.CONNECTED, ip = ip, node = name, detail = "Tunnel OK")
+                updateNotification("VPN подключён", "$name • $ip")
                 monitorJob?.cancel()
                 monitorJob = scope.launch { monitorConnection(server) }
-                scope.launch { publishIp(name) }
                 return
             } catch (t: Throwable) {
                 lastError = t.message ?: t.javaClass.simpleName
@@ -102,16 +118,14 @@ class VPNService : VpnService(), CommandServerHandler {
         fail("Рабочий узел не найден: $lastError")
     }
 
-    private suspend fun publishIp(node: String) {
-        repeat(5) {
-            if (!running.get()) return
-            fetchExternalIp().takeIf(String::isNotBlank)?.let { ip ->
-                broadcast(AppState.CONNECTED, ip, node, "Tunnel OK")
-                updateNotification("VPN подключён", "$node • $ip")
-                return
-            }
-            delay(2_000)
+    private suspend fun awaitExternalIp(timeoutMs: Long): String {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (scope.isActive && running.get() && System.currentTimeMillis() < deadline) {
+            val ip = fetchExternalIp()
+            if (ip.isNotBlank()) return ip
+            delay(1_500)
         }
+        return ""
     }
 
     private suspend fun monitorConnection(server: CommandServer) {
@@ -133,7 +147,12 @@ class VPNService : VpnService(), CommandServerHandler {
     }
 
     private fun fetchExternalIp(): String {
-        val urls = listOf("https://api.ipify.org", "https://api64.ipify.org", "https://ifconfig.me/ip", "https://icanhazip.com")
+        val urls = listOf(
+            "https://api.ipify.org",
+            "https://api64.ipify.org",
+            "https://ifconfig.me/ip",
+            "https://icanhazip.com",
+        )
         for (raw in urls) {
             try {
                 val c = URL(raw).openConnection() as HttpURLConnection
@@ -148,8 +167,16 @@ class VPNService : VpnService(), CommandServerHandler {
         return ""
     }
 
-    override fun onRevoke() { stopCore("VPN permission revoked"); super.onRevoke() }
-    override fun onDestroy() { stopCore("Service destroyed"); super.onDestroy() }
+    override fun onRevoke() {
+        stopCore("VPN permission revoked")
+        super.onRevoke()
+    }
+
+    override fun onDestroy() {
+        stopCore("Service destroyed")
+        super.onDestroy()
+    }
+
     override fun onBind(intent: Intent): IBinder? = super.onBind(intent)
 
     private fun stopCore(reason: String) {
@@ -163,7 +190,6 @@ class VPNService : VpnService(), CommandServerHandler {
             runCatching { tunPfd?.close() }
             tunPfd = null
             DefaultNetworkMonitor.stop()
-            getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit().putString(AppState.STATE, AppState.DISCONNECTED).apply()
             broadcast(AppState.DISCONNECTED, detail = reason)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -171,6 +197,8 @@ class VPNService : VpnService(), CommandServerHandler {
     }
 
     private fun fail(message: String) {
+        // A failed candidate set is recoverable. Keep the foreground service alive
+        // so the user sees the error and can retry; only explicit disconnect stops it.
         running.set(false)
         monitorJob?.cancel()
         monitorJob = null
@@ -199,12 +227,14 @@ class VPNService : VpnService(), CommandServerHandler {
     }
 
     private fun updateNotification(title: String, text: String) = runCatching {
-        getSystemService(android.app.NotificationManager::class.java)?.notify(NotificationHelper.ID, NotificationHelper.build(this, title, text))
+        getSystemService(android.app.NotificationManager::class.java)?.notify(
+            NotificationHelper.ID,
+            NotificationHelper.build(this, title, text),
+        )
     }
 
     fun openTunInternal(options: TunOptions): Int {
         if (prepare(this) != null) error("android: missing vpn permission")
-
         val builder = Builder().setSession("AliVPN").setMtu(options.mtu.coerceIn(1280, 9000))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
 
@@ -213,7 +243,6 @@ class VPNService : VpnService(), CommandServerHandler {
             val address = inet4.next()
             builder.addAddress(address.address(), address.prefix())
         }
-
         val inet6 = options.inet6Address
         while (inet6.hasNext()) {
             val address = inet6.next()
@@ -223,12 +252,9 @@ class VPNService : VpnService(), CommandServerHandler {
         if (options.autoRoute) {
             val dns = options.dnsServerAddress
             while (dns.hasNext()) {
-                val server = dns.next()
-                if (server.isNotBlank()) {
-                    builder.addDnsServer(InetAddress.getByName(server))
-                }
+                val value = dns.next()
+                if (value.isNotBlank()) builder.addDnsServer(InetAddress.getByName(value))
             }
-
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val r4 = options.inet4RouteAddress
                 var addedV4Route = false
@@ -238,51 +264,41 @@ class VPNService : VpnService(), CommandServerHandler {
                     addedV4Route = true
                 }
                 if (!addedV4Route) builder.addRoute("0.0.0.0", 0)
-
                 val r6 = options.inet6RouteAddress
                 while (r6.hasNext()) {
                     val route = r6.next()
                     builder.addRoute(route.address(), route.prefix())
                 }
-
                 val e4 = options.inet4RouteExcludeAddress
                 while (e4.hasNext()) {
                     val route = e4.next()
-                    val prefix = android.net.IpPrefix(InetAddress.getByName(route.address()), route.prefix())
-                    builder.excludeRoute(prefix)
+                    builder.excludeRoute(android.net.IpPrefix(InetAddress.getByName(route.address()), route.prefix()))
                 }
-
                 val e6 = options.inet6RouteExcludeAddress
                 while (e6.hasNext()) {
                     val route = e6.next()
-                    val prefix = android.net.IpPrefix(InetAddress.getByName(route.address()), route.prefix())
-                    builder.excludeRoute(prefix)
+                    builder.excludeRoute(android.net.IpPrefix(InetAddress.getByName(route.address()), route.prefix()))
                 }
             } else {
                 val r4 = options.inet4RouteRange
                 if (r4.hasNext()) {
                     while (r4.hasNext()) {
-                        val p = r4.next()
-                        builder.addRoute(p.address(), p.prefix())
+                        val route = r4.next()
+                        builder.addRoute(route.address(), route.prefix())
                     }
-                } else {
-                    builder.addRoute("0.0.0.0", 0)
-                }
-
+                } else builder.addRoute("0.0.0.0", 0)
                 val r6 = options.inet6RouteRange
                 while (r6.hasNext()) {
-                    val p = r6.next()
-                    builder.addRoute(p.address(), p.prefix())
+                    val route = r6.next()
+                    builder.addRoute(route.address(), route.prefix())
                 }
             }
         }
 
         val include = options.includePackage
         while (include.hasNext()) runCatching { builder.addAllowedApplication(include.next()) }
-
         val exclude = options.excludePackage
         while (exclude.hasNext()) runCatching { builder.addDisallowedApplication(exclude.next()) }
-
         val pfd = builder.establish() ?: error("android: VPN establish failed")
         tunPfd?.close()
         tunPfd = pfd
@@ -290,12 +306,13 @@ class VPNService : VpnService(), CommandServerHandler {
     }
 
     fun sendLibboxNotification(notification: Notification) {
-        val body = notification.body.ifBlank { notification.subtitle }.ifBlank { "AliVPN" }
-        updateNotification(notification.title.ifBlank { "AliVPN" }, body)
+        updateNotification(
+            notification.title.ifBlank { "AliVPN" },
+            notification.body.ifBlank { notification.subtitle }.ifBlank { "AliVPN" },
+        )
     }
 
     fun cancelLibboxNotification(identifier: String, typeID: Int) = Unit
-
     override fun serviceStop() = stopCore("Core requested stop")
     override fun serviceReload() = Unit
     override fun getSystemProxyStatus(): SystemProxyStatus = SystemProxyStatus().apply {
