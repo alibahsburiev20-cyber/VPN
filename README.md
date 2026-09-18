@@ -2,31 +2,25 @@
 
 AliVPN is an Android VPN client built around Android `VpnService` and the official sing-box `libbox.aar` 1.14.0. It downloads public proxy configurations, validates supported formats, tries multiple candidates, creates a full-tunnel TUN, and reports `CONNECTED` only after traffic through the tunnel returns a valid external IP.
 
-## Connection flow
-
-`CONNECT → download sources → deduplicate → validate configs → Android VPN permission → foreground VPN service → libbox/sing-box → TUN → real traffic check → CONNECTED`
-
-A syntactically valid configuration is not considered a working node. Each candidate must start libbox and pass the external traffic check before the UI reports `CONNECTED`.
-
 ## Build
 
-The app uses the official `libbox.aar` release asset. GitHub Actions downloads it from:
+GitHub Actions downloads the official AAR from:
 
 `https://github.com/singbox-android/libbox/releases/download/1.14.0/libbox.aar`
 
-Then it runs:
+Then it runs `gradle :app:assembleDebug` and uploads `app-debug.apk`.
 
-`gradle :app:assembleDebug`
+## Connection behavior
 
-and uploads `app-debug.apk`.
+The app validates candidate configurations, starts candidates one at a time, and reports `CONNECTED` only after a real external traffic check succeeds. Failed candidates are skipped. If all candidates fail, the app shows a recoverable error instead of claiming a connection.
 
 ## Public nodes
 
-Several public sources are tried, including mirrors and independent repositories. Public nodes are third-party infrastructure and may be offline, blocked, malicious, or unstable. Never use them for sensitive traffic. The app must skip candidates that fail configuration or real traffic validation.
+Several independent public sources and mirrors are tried. Public nodes are third-party infrastructure and may be offline, blocked, malicious, or unstable. Never use them for sensitive traffic. No public-node list can guarantee availability.
 
-## Verification status
+## Verification limits
 
-A stub-based structural test is not equivalent to building against the real AAR. The authoritative check is the GitHub Actions build and, separately, installation and VPN testing on a real Android device.
+Structural checks and synthetic parser fixtures are not equivalent to a build against the real AAR or a device-level VPN test. The authoritative build check is GitHub Actions; stable runtime behavior must be verified on an Android device.
 
 ## License
 
