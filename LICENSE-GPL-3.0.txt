@@ -1,0 +1,4 @@
+GPL-3.0-or-later
+
+This project embeds and uses the GPL-licensed sing-box libbox component.
+See https://www.gnu.org/licenses/gpl-3.0.html
