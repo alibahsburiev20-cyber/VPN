@@ -16,13 +16,27 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+
+      - name: Download official libbox 1.14.0 AAR
+        run: |
+          set -euo pipefail
+          mkdir -p app/libs
+          curl --fail --location --retry 3 \
+            -o app/libs/libbox.aar \
+            https://github.com/singbox-android/libbox/releases/download/1.14.0/libbox.aar
+          test -s app/libs/libbox.aar
+          unzip -t app/libs/libbox.aar >/dev/null
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.10.2"
+
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
+
       - name: Verify APK exists
         run: test -s app/build/outputs/apk/debug/app-debug.apk
+
       - uses: actions/upload-artifact@v4
         with:
           name: AliVPN-debug-apk
