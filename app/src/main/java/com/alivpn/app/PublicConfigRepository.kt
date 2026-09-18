@@ -11,6 +11,12 @@ class PublicConfigRepository {
         private val SOURCES = listOf(
             "https://raw.githubusercontent.com/aviamastersgh/vpn-free-russia/main/verified_configs.txt",
             "https://cdn.jsdelivr.net/gh/aviamastersgh/vpn-free-russia@main/verified_configs.txt",
+            "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt",
+            "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/main/V2Ray-Config-By-EbraSha.txt",
+            "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/main/vless_configs.txt",
+            "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/main/vmess_configs.txt",
+            "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/main/trojan_configs.txt",
+            "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/main/ss_configs.txt",
         )
     }
 
@@ -20,17 +26,19 @@ class PublicConfigRepository {
         for (source in SOURCES) {
             try {
                 val body = download(source)
-                for (line in body.lineSequence()) {
+                val decoded = decodeSubscriptionIfNeeded(body)
+                for (line in decoded.lineSequence()) {
                     val node = UriNodeParser.parse(line) ?: continue
                     val key = canonical(node.uri)
                     if (!all.containsKey(key)) all[key] = node
-                    if (all.size >= 100) break
+                    if (all.size >= 200) break
                 }
             } catch (t: Throwable) {
                 lastError = t
             }
+            if (all.size >= 200) break
         }
-        if (all.isEmpty()) throw IllegalStateException(lastError?.message ?: "No working source")
+        if (all.isEmpty()) throw IllegalStateException(lastError?.message ?: "No supported nodes")
         return all.values.toList()
     }
 
@@ -38,7 +46,7 @@ class PublicConfigRepository {
         val connection = (URL(source).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 8_000
-            readTimeout = 12_000
+            readTimeout = 15_000
             instanceFollowRedirects = true
             setRequestProperty("User-Agent", "AliVPN/1.0 Android")
             setRequestProperty("Accept", "text/plain,*/*")
@@ -50,11 +58,21 @@ class PublicConfigRepository {
         try {
             if (responseCode !in 200..299) error("HTTP $responseCode")
             BufferedReader(InputStreamReader(inputStream, Charsets.UTF_8)).use { reader ->
-                return reader.readText().take(2_000_000)
+                return reader.readText().take(4_000_000)
             }
         } finally {
             disconnect()
         }
+    }
+
+    private fun decodeSubscriptionIfNeeded(body: String): String {
+        val lines = body.lineSequence().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
+        if (lines.any { it.startsWith("vless://", true) || it.startsWith("vmess://", true) || it.startsWith("trojan://", true) || it.startsWith("ss://", true) || it.startsWith("socks5://", true) || it.startsWith("http://", true) }) {
+            return lines.joinToString("\n")
+        }
+        return runCatching {
+            String(android.util.Base64.decode(body.replace(Regex("\\s"), ""), android.util.Base64.DEFAULT), Charsets.UTF_8)
+        }.getOrDefault(body)
     }
 
     private fun canonical(uri: String): String = uri.trim().lowercase(Locale.US).substringBefore('#')
