@@ -43,7 +43,6 @@ class VPNService : VpnService(), CommandServerHandler {
     private var candidates: List<String> = emptyList()
     private var currentNodeIndex = -1
     private var lastConnectedNode: String = ""
-
     private val platform = object : PlatformInterfaceWrapper(this) {}
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -90,8 +89,7 @@ class VPNService : VpnService(), CommandServerHandler {
                 val ip = fetchExternalIp()
                 if (ip.isNotBlank()) {
                     lastConnectedNode = name
-                    getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit()
-                        .putString(AppState.LAST_URI, uri).apply()
+                    getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit().putString(AppState.LAST_URI, uri).apply()
                     broadcast(AppState.CONNECTED, ip = ip, node = name, detail = "Tunnel OK")
                     updateNotification("VPN подключён", "$name • $ip")
                     monitorJob?.cancel()
@@ -113,8 +111,7 @@ class VPNService : VpnService(), CommandServerHandler {
         while (scope.isActive && running.get()) {
             delay(90_000)
             if (!scope.isActive || !running.get()) return
-            val ip = runCatching { fetchExternalIp() }.getOrDefault("")
-            if (ip.isNotBlank()) continue
+            if (runCatching { fetchExternalIp() }.getOrDefault("").isNotBlank()) continue
             broadcast(AppState.CONNECTING, node = lastConnectedNode, detail = "Переподключение…")
             runCatching { server.closeService() }
             connectBest(server)
@@ -123,13 +120,7 @@ class VPNService : VpnService(), CommandServerHandler {
     }
 
     private fun fetchExternalIp(): String {
-        val endpoints = listOf(
-            "https://api.ipify.org",
-            "https://api64.ipify.org",
-            "https://ifconfig.me/ip",
-            "https://icanhazip.com",
-            "https://ipinfo.io/ip",
-        )
+        val endpoints = listOf("https://api.ipify.org", "https://api64.ipify.org", "https://ifconfig.me/ip", "https://icanhazip.com", "https://ipinfo.io/ip")
         for (endpoint in endpoints) {
             try {
                 val c = URL(endpoint).openConnection() as HttpURLConnection
@@ -144,16 +135,8 @@ class VPNService : VpnService(), CommandServerHandler {
         return ""
     }
 
-    override fun onRevoke() {
-        stopCore("VPN permission revoked")
-        super.onRevoke()
-    }
-
-    override fun onDestroy() {
-        stopCore("Service destroyed")
-        super.onDestroy()
-    }
-
+    override fun onRevoke() { stopCore("VPN permission revoked"); super.onRevoke() }
+    override fun onDestroy() { stopCore("Service destroyed"); super.onDestroy() }
     override fun onBind(intent: Intent): IBinder? = super.onBind(intent)
 
     private fun stopCore(reason: String) {
@@ -175,11 +158,7 @@ class VPNService : VpnService(), CommandServerHandler {
     }
 
     private fun fail(message: String) {
-        getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit()
-            .putString(AppState.STATE, AppState.FAILED)
-            .putString(AppState.IP, "")
-            .putString(AppState.NODE, "")
-            .apply()
+        getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit().putString(AppState.STATE, AppState.FAILED).putString(AppState.IP, "").putString(AppState.NODE, "").apply()
         broadcast(AppState.FAILED, detail = message)
         updateNotification("AliVPN", "Не удалось подключиться")
         running.set(false)
@@ -196,16 +175,9 @@ class VPNService : VpnService(), CommandServerHandler {
     }
 
     private fun broadcast(state: String, ip: String = "", node: String = "", detail: String = "") {
-        getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit()
-            .putString(AppState.STATE, state)
-            .putString(AppState.IP, ip)
-            .putString(AppState.NODE, node)
-            .apply()
+        getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit().putString(AppState.STATE, state).putString(AppState.IP, ip).putString(AppState.NODE, node).apply()
         sendBroadcast(Intent(ACTION_STATUS).setPackage(packageName).also {
-            it.putExtra(EXTRA_STATE, state)
-            it.putExtra(EXTRA_IP, ip)
-            it.putExtra(EXTRA_NODE, node)
-            it.putExtra(EXTRA_DETAIL, detail)
+            it.putExtra(EXTRA_STATE, state); it.putExtra(EXTRA_IP, ip); it.putExtra(EXTRA_NODE, node); it.putExtra(EXTRA_DETAIL, detail)
         })
     }
 
@@ -215,74 +187,40 @@ class VPNService : VpnService(), CommandServerHandler {
 
     fun openTunInternal(options: TunOptions): Int {
         if (prepare(this) != null) error("android: missing vpn permission")
-        val mtu = options.mtu.coerceIn(1280, 9000)
-        val builder = Builder().setSession("AliVPN").setMtu(mtu)
+        val builder = Builder().setSession("AliVPN").setMtu(options.mtu.coerceIn(1280, 9000))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
-
         val inet4 = options.inet4Address
-        while (inet4.hasNext()) {
-            val address = inet4.next()
-            builder.addAddress(address.address(), address.prefix())
-        }
+        while (inet4.hasNext()) { val address = inet4.next(); builder.addAddress(address.address(), address.prefix()) }
         val inet6 = options.inet6Address
-        while (inet6.hasNext()) {
-            val address = inet6.next()
-            builder.addAddress(address.address(), address.prefix())
-        }
+        while (inet6.hasNext()) { val address = inet6.next(); builder.addAddress(address.address(), address.prefix()) }
 
         if (options.autoRoute) {
             val dns = options.dnsServerAddress
-            val dnsAddress = InetAddress.getByName(dns)
-            builder.addDnsServer(dnsAddress)
-
+            while (dns.hasNext()) builder.addDnsServer(InetAddress.getByName(dns.next()))
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val r4 = options.inet4RouteAddress
                 var addedV4Route = false
-                while (r4.hasNext()) {
-                    val route = r4.next()
-                    builder.addRoute(route.address(), route.prefix())
-                    addedV4Route = true
-                }
+                while (r4.hasNext()) { val route = r4.next(); builder.addRoute(route.address(), route.prefix()); addedV4Route = true }
                 if (!addedV4Route) builder.addRoute("0.0.0.0", 0)
                 val r6 = options.inet6RouteAddress
-                while (r6.hasNext()) {
-                    val route = r6.next()
-                    builder.addRoute(route.address(), route.prefix())
-                }
+                while (r6.hasNext()) { val route = r6.next(); builder.addRoute(route.address(), route.prefix()) }
                 val e4 = options.inet4RouteExcludeAddress
-                while (e4.hasNext()) {
-                    val route = e4.next()
-                    builder.excludeRoute(android.net.IpPrefix(InetAddress.getByName(route.address()), route.prefix()))
-                }
+                while (e4.hasNext()) { val route = e4.next(); builder.excludeRoute(android.net.IpPrefix(InetAddress.getByName(route.address()), route.prefix())) }
                 val e6 = options.inet6RouteExcludeAddress
-                while (e6.hasNext()) {
-                    val route = e6.next()
-                    builder.excludeRoute(android.net.IpPrefix(InetAddress.getByName(route.address()), route.prefix()))
-                }
+                while (e6.hasNext()) { val route = e6.next(); builder.excludeRoute(android.net.IpPrefix(InetAddress.getByName(route.address()), route.prefix())) }
             } else {
                 val r4 = options.inet4RouteRange
-                if (r4.hasNext()) {
-                    while (r4.hasNext()) {
-                        val p = r4.next()
-                        builder.addRoute(p.address(), p.prefix())
-                    }
-                } else builder.addRoute("0.0.0.0", 0)
+                if (r4.hasNext()) while (r4.hasNext()) { val p = r4.next(); builder.addRoute(p.address(), p.prefix()) } else builder.addRoute("0.0.0.0", 0)
                 val r6 = options.inet6RouteRange
-                while (r6.hasNext()) {
-                    val p = r6.next()
-                    builder.addRoute(p.address(), p.prefix())
-                }
+                while (r6.hasNext()) { val p = r6.next(); builder.addRoute(p.address(), p.prefix()) }
             }
         }
-
         val include = options.includePackage
         while (include.hasNext()) runCatching { builder.addAllowedApplication(include.next()) }
         val exclude = options.excludePackage
         while (exclude.hasNext()) runCatching { builder.addDisallowedApplication(exclude.next()) }
-
         val pfd = builder.establish() ?: error("android: VPN establish failed")
-        tunPfd?.close()
-        tunPfd = pfd
+        tunPfd?.close(); tunPfd = pfd
         return pfd.fd
     }
 
@@ -290,15 +228,10 @@ class VPNService : VpnService(), CommandServerHandler {
         val body = notification.body.ifBlank { notification.subtitle }.ifBlank { "AliVPN" }
         updateNotification(notification.title.ifBlank { "AliVPN" }, body)
     }
-
     fun cancelLibboxNotification(identifier: String, typeID: Int) = Unit
-
     override fun serviceStop() = stopCore("Core requested stop")
     override fun serviceReload() = Unit
-    override fun getSystemProxyStatus(): SystemProxyStatus = SystemProxyStatus().apply {
-        available = false
-        enabled = false
-    }
+    override fun getSystemProxyStatus(): SystemProxyStatus = SystemProxyStatus().apply { available = false; enabled = false }
     override fun setSystemProxyEnabled(enabled: Boolean) = Unit
     override fun triggerNativeCrash() = error("Native crash not supported")
     override fun writeDebugMessage(message: String) { Log.d(TAG, message) }
