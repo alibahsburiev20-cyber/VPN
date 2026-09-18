@@ -1,23 +1,19 @@
-# AliVPN 1.0.0 verification report
+# AliVPN verification report
 
-Date: 2026-09-18
+## Current status
 
-## Checks passed
+The project uses the official `libbox.aar` 1.14.0 release asset. GitHub Actions downloads the AAR before running `:app:assembleDebug`.
 
-- `scripts/check_static.py`: PASS
-- Kotlin structural compile using the project sources plus an isolated Android/libbox API stub: PASS
-- Core fixture execution: PASS, 7/7
-- XML parsing: PASS
-- Manifest permission/service checks: PASS
-- Legacy libbox auto-redirect API regression checks: PASS
-- Full-tunnel invariants (`tun`, `auto_route`, `strict_route`, `auto_detect_interface`, `final=proxy`): PASS
+## Checks
 
-## Core fixture coverage
+- Static XML/resource checks: previously passed.
+- Parser/config fixture checks: previously passed for 7 synthetic formats.
+- Structural Kotlin checks: passed only against an isolated API stub; this does not prove compatibility with the real AAR.
+- Real Android Gradle build: pending the GitHub Actions run for the workflow that downloads the real AAR.
+- Device-level VPN/TUN test: not performed here and must be run on a real Android device.
 
-VLESS, VLESS Reality, Trojan, Shadowsocks, SOCKS5, HTTP proxy, and VMess all parsed and generated a TUN-based sing-box configuration in the structural test harness.
+## Runtime acceptance
 
-## Environment limitation
+`CONNECTED` is emitted only after libbox starts a candidate and external traffic returns a valid IP. Failed candidates are skipped. If all candidates fail, the app reports a recoverable error rather than claiming a connection.
 
-A genuine Android Gradle build and device-level VPN/TUN test were not possible in this execution environment because no Android SDK/build-tools or Gradle dependency cache is installed and outbound network access is unavailable. Therefore this report does not claim that an APK was installed or that a live third-party public node was successfully connected from this container.
-
-The GitHub Actions workflow in `.github/workflows/build.yml` is configured to perform the actual Gradle build with Java 17 and Gradle 8.10.2 and upload `app-debug.apk`.
+Public nodes are third-party and can be unavailable, blocked, malicious, or unstable. No public-node list guarantees availability.
