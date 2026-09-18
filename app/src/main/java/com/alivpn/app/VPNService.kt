@@ -12,13 +12,7 @@ import io.nekohasekai.libbox.Notification
 import io.nekohasekai.libbox.OverrideOptions
 import io.nekohasekai.libbox.SystemProxyStatus
 import io.nekohasekai.libbox.TunOptions
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
 import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.URL
@@ -34,24 +28,20 @@ class VPNService : VpnService(), CommandServerHandler {
         private const val TAG = "AliVPN-Service"
         private const val EXTRA_CANDIDATES_PATH = "candidates_path"
     }
-
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var commandServer: CommandServer? = null
     private var tunPfd: ParcelFileDescriptor? = null
     private var monitorJob: Job? = null
     private val running = AtomicBoolean(false)
-    private var candidates: List<String> = emptyList()
-    private var currentNodeIndex = -1
-    private var lastConnectedNode: String = ""
-
+    private var candidates = emptyList<String>()
+    private var lastConnectedNode = ""
     private val platform = object : PlatformInterfaceWrapper(this) {}
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NotificationHelper.ID, NotificationHelper.build(this, "AliVPN", "Запуск VPN…"))
         if (running.compareAndSet(false, true)) {
             candidates = runCatching {
-                val path = intent?.getStringExtra(EXTRA_CANDIDATES_PATH)
-                if (path.isNullOrBlank()) emptyList() else java.io.File(path).readLines().filter { it.isNotBlank() }
+                intent?.getStringExtra(EXTRA_CANDIDATES_PATH)?.let { java.io.File(it).readLines().filter(String::isNotBlank) }.orEmpty()
             }.getOrDefault(emptyList())
             scope.launch { startCore() }
         }
@@ -59,12 +49,18 @@ class VPNService : VpnService(), CommandServerHandler {
     }
 
     private suspend fun startCore() {
-        broadcast(AppState.CONNECTING, detail = "Подготовка ядра")
+        broadcast(AppState.CONNECTING, detail = "Проверка конфигураций и узлов")
         try {
-            val server = CommandServer(this@VPNService, platform)
-            server.start()
-            commandServer = server
-            if (candidates.isEmpty()) error("Нет кандидатов для подключения")
+            if (candidates.isEmpty()) error("Нет узлов для подключения")
+            // First reject every malformed/incompatible configuration. No node is
+            // presented as connected until its libbox service has started.
+            val valid = candidates.filter { uri ->
+                runCatching { io.nekohasekai.libbox.Libbox.checkConfig(SingBoxConfig.build(uri)); true }
+                    .onFailure { Log.w(TAG, "Invalid node: $uri", it) }.getOrDefault(false)
+            }
+            if (valid.isEmpty()) error("Все узлы имеют ошибку конфигурации")
+            candidates = valid
+            val server = commandServer ?: CommandServer(this, platform).also { it.start(); commandServer = it }
             connectBest(server)
         } catch (t: Throwable) {
             Log.e(TAG, "startCore failed", t)
@@ -73,49 +69,42 @@ class VPNService : VpnService(), CommandServerHandler {
     }
 
     private suspend fun connectBest(server: CommandServer) {
-        val max = minOf(candidates.size, 12)
-        var lastError = "unknown"
-        for (i in 0 until max) {
+        var lastError = "неизвестная ошибка"
+        for ((index, uri) in candidates.withIndex()) {
             if (!scope.isActive || !running.get()) return
-            currentNodeIndex = i
-            val uri = candidates[i]
-            val name = runCatching { UriNodeParser.parse(uri)?.name ?: "Node ${i + 1}" }.getOrDefault("Node ${i + 1}")
-            updateNotification("Проверка узла ${i + 1}/$max", name)
-            broadcast(AppState.CONNECTING, node = name, detail = "Запуск узла ${i + 1}/$max")
+            val name = runCatching { UriNodeParser.parse(uri)?.name ?: "Node ${index + 1}" }.getOrDefault("Node ${index + 1}")
+            broadcast(AppState.CONNECTING, node = name, detail = "Проверка узла ${index + 1}/${candidates.size}")
+            updateNotification("Проверка узла ${index + 1}/${candidates.size}", name)
             try {
                 val config = SingBoxConfig.build(uri)
                 io.nekohasekai.libbox.Libbox.checkConfig(config)
                 server.startOrReloadService(config, OverrideOptions().also { it.autoRedirect = false })
-
-                // Starting libbox is the connection event. Do not tear down a working
-                // tunnel just because an external IP endpoint is slow or unavailable.
                 delay(4_000)
                 lastConnectedNode = name
-                getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit()
-                    .putString(AppState.LAST_URI, uri).apply()
+                getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit().putString(AppState.LAST_URI, uri).apply()
                 broadcast(AppState.CONNECTED, node = name, detail = "Tunnel запущен")
                 updateNotification("VPN подключён", name)
-
                 monitorJob?.cancel()
                 monitorJob = scope.launch { monitorConnection(server) }
-                scope.launch { publishExternalIpWhenAvailable(name) }
+                scope.launch { publishIp(name) }
                 return
             } catch (t: Throwable) {
                 lastError = t.message ?: t.javaClass.simpleName
-                Log.w(TAG, "node $i failed: $uri", t)
+                Log.w(TAG, "Node $index failed: $uri", t)
                 runCatching { server.closeService() }
                 delay(500)
             }
         }
-        fail("Не удалось запустить ни один узел: $lastError")
+        // Do not stop the service or silently disconnect the user. Keep the
+        // foreground notification and let CONNECT retry after showing the error.
+        fail("Рабочий узел не найден: $lastError")
     }
 
-    private suspend fun publishExternalIpWhenAvailable(node: String) {
+    private suspend fun publishIp(node: String) {
         repeat(5) {
             if (!running.get()) return
-            val ip = runCatching { fetchExternalIp() }.getOrDefault("")
-            if (ip.isNotBlank()) {
-                broadcast(AppState.CONNECTED, ip = ip, node = node, detail = "Tunnel OK")
+            fetchExternalIp().takeIf(String::isNotBlank)?.let { ip ->
+                broadcast(AppState.CONNECTED, ip, node, "Tunnel OK")
                 updateNotification("VPN подключён", "$node • $ip")
                 return
             }
@@ -124,41 +113,29 @@ class VPNService : VpnService(), CommandServerHandler {
     }
 
     private suspend fun monitorConnection(server: CommandServer) {
-        var failedChecks = 0
+        var failures = 0
         while (scope.isActive && running.get()) {
             delay(90_000)
-            if (!scope.isActive || !running.get()) return
-            val ip = runCatching { fetchExternalIp() }.getOrDefault("")
-            if (ip.isNotBlank()) {
-                failedChecks = 0
-                broadcast(AppState.CONNECTED, ip = ip, node = lastConnectedNode, detail = "Tunnel OK")
-                continue
-            }
-            failedChecks++
-            Log.w(TAG, "external IP check failed ($failedChecks/3)")
-            if (failedChecks < 3) continue
-
-            broadcast(AppState.CONNECTING, node = lastConnectedNode, detail = "Проверка соединения…")
+            if (!running.get()) return
+            if (fetchExternalIp().isNotBlank()) { failures = 0; continue }
+            if (++failures < 3) continue
+            broadcast(AppState.CONNECTING, node = lastConnectedNode, detail = "Переподключение…")
             runCatching { server.closeService() }
-            failedChecks = 0
+            failures = 0
             connectBest(server)
             return
         }
     }
 
     private fun fetchExternalIp(): String {
-        val endpoints = listOf("https://api.ipify.org", "https://api64.ipify.org", "https://ifconfig.me/ip", "https://icanhazip.com", "https://ipinfo.io/ip")
-        for (endpoint in endpoints) {
-            try {
-                val c = URL(endpoint).openConnection() as HttpURLConnection
-                c.connectTimeout = 4_000
-                c.readTimeout = 5_000
-                c.setRequestProperty("User-Agent", "AliVPN/1.0 Android")
-                val result = c.inputStream.bufferedReader().use { it.readText() }.trim()
-                c.disconnect()
-                if (result.matches(Regex("^[0-9a-fA-F:.]{3,80}$"))) return result
-            } catch (_: Throwable) {}
-        }
+        val urls = listOf("https://api.ipify.org", "https://api64.ipify.org", "https://ifconfig.me/ip", "https://icanhazip.com")
+        for (raw in urls) try {
+            val c = URL(raw).openConnection() as HttpURLConnection
+            c.connectTimeout = 4_000; c.readTimeout = 5_000
+            c.setRequestProperty("User-Agent", "AliVPN/1.0 Android")
+            val result = c.inputStream.bufferedReader().use { it.readText() }.trim(); c.disconnect()
+            if (result.matches(Regex("^[0-9a-fA-F:.]{3,80}$"))) return result
+        } catch (_: Throwable) {}
         return ""
     }
 
@@ -169,101 +146,63 @@ class VPNService : VpnService(), CommandServerHandler {
     private fun stopCore(reason: String) {
         if (!running.compareAndSet(true, false)) return
         monitorJob?.cancel()
-        monitorJob = null
         scope.launch {
-            runCatching { commandServer?.closeService() }
-            runCatching { commandServer?.close() }
-            commandServer = null
-            runCatching { tunPfd?.close() }
-            tunPfd = null
+            runCatching { commandServer?.closeService() }; runCatching { commandServer?.close() }
+            commandServer = null; runCatching { tunPfd?.close() }; tunPfd = null
             DefaultNetworkMonitor.stop()
-            getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit().putString(AppState.STATE, AppState.DISCONNECTED).apply()
             broadcast(AppState.DISCONNECTED, detail = reason)
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
         }
     }
 
     private fun fail(message: String) {
+        // Keep the foreground service alive. This is a recoverable connection
+        // error, not a request to disconnect the VPN service or kick the user out.
+        running.set(false)
+        monitorJob?.cancel(); monitorJob = null
+        runCatching { commandServer?.closeService() }
         getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit()
             .putString(AppState.STATE, AppState.FAILED).putString(AppState.IP, "").putString(AppState.NODE, "").apply()
         broadcast(AppState.FAILED, detail = message)
-        updateNotification("AliVPN", "Не удалось подключиться")
-        running.set(false)
-        scope.launch {
-            runCatching { commandServer?.closeService() }
-            runCatching { commandServer?.close() }
-            commandServer = null
-            runCatching { tunPfd?.close() }
-            tunPfd = null
-            DefaultNetworkMonitor.stop()
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-        }
+        updateNotification("AliVPN: ошибка подключения", message)
     }
 
     private fun broadcast(state: String, ip: String = "", node: String = "", detail: String = "") {
-        getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit()
-            .putString(AppState.STATE, state).putString(AppState.IP, ip).putString(AppState.NODE, node).apply()
-        sendBroadcast(Intent(ACTION_STATUS).setPackage(packageName).also {
-            it.putExtra(EXTRA_STATE, state); it.putExtra(EXTRA_IP, ip); it.putExtra(EXTRA_NODE, node); it.putExtra(EXTRA_DETAIL, detail)
-        })
+        getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit().putString(AppState.STATE, state).putString(AppState.IP, ip).putString(AppState.NODE, node).apply()
+        sendBroadcast(Intent(ACTION_STATUS).setPackage(packageName).also { it.putExtra(EXTRA_STATE, state); it.putExtra(EXTRA_IP, ip); it.putExtra(EXTRA_NODE, node); it.putExtra(EXTRA_DETAIL, detail) })
     }
-
-    private fun updateNotification(title: String, text: String) {
-        runCatching { getSystemService(android.app.NotificationManager::class.java)?.notify(NotificationHelper.ID, NotificationHelper.build(this, title, text)) }
-    }
+    private fun updateNotification(title: String, text: String) = runCatching { getSystemService(android.app.NotificationManager::class.java)?.notify(NotificationHelper.ID, NotificationHelper.build(this, title, text)) }
 
     fun openTunInternal(options: TunOptions): Int {
         if (prepare(this) != null) error("android: missing vpn permission")
-        val builder = Builder().setSession("AliVPN").setMtu(options.mtu.coerceIn(1280, 9000))
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
-        val inet4 = options.inet4Address
-        while (inet4.hasNext()) { val address = inet4.next(); builder.addAddress(address.address(), address.prefix()) }
-        val inet6 = options.inet6Address
-        while (inet6.hasNext()) { val address = inet6.next(); builder.addAddress(address.address(), address.prefix()) }
-
+        val b = Builder().setSession("AliVPN").setMtu(options.mtu.coerceIn(1280, 9000))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) b.setMetered(false)
+        fun addAddresses(it: io.nekohasekai.libbox.NetworkInterfaceIterator) { while (it.hasNext()) { val a = it.next(); b.addAddress(a.address(), a.prefix()) } }
+        addAddresses(options.inet4Address); addAddresses(options.inet6Address)
         if (options.autoRoute) {
             val dns = options.dnsServerAddress
-            while (dns.hasNext()) {
-                val value = dns.next()
-                if (value.isNotBlank()) builder.addDnsServer(InetAddress.getByName(value))
-            }
+            while (dns.hasNext()) dns.next().takeIf(String::isNotBlank)?.let { b.addDnsServer(InetAddress.getByName(it)) }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                val r4 = options.inet4RouteAddress
-                var addedV4Route = false
-                while (r4.hasNext()) { val route = r4.next(); builder.addRoute(route.address(), route.prefix()); addedV4Route = true }
-                if (!addedV4Route) builder.addRoute("0.0.0.0", 0)
-                val r6 = options.inet6RouteAddress
-                while (r6.hasNext()) { val route = r6.next(); builder.addRoute(route.address(), route.prefix()) }
-                val e4 = options.inet4RouteExcludeAddress
-                while (e4.hasNext()) { val route = e4.next(); builder.excludeRoute(android.net.IpPrefix(InetAddress.getByName(route.address()), route.prefix())) }
-                val e6 = options.inet6RouteExcludeAddress
-                while (e6.hasNext()) { val route = e6.next(); builder.excludeRoute(android.net.IpPrefix(InetAddress.getByName(route.address()), route.prefix())) }
+                val r4 = options.inet4RouteAddress; var added = false
+                while (r4.hasNext()) { val r = r4.next(); b.addRoute(r.address(), r.prefix()); added = true }
+                if (!added) b.addRoute("0.0.0.0", 0)
+                val r6 = options.inet6RouteAddress; while (r6.hasNext()) { val r = r6.next(); b.addRoute(r.address(), r.prefix()) }
+                val e4 = options.inet4RouteExcludeAddress; while (e4.hasNext()) { val r = e4.next(); b.excludeRoute(android.net.IpPrefix(InetAddress.getByName(r.address()), r.prefix())) }
+                val e6 = options.inet6RouteExcludeAddress; while (e6.hasNext()) { val r = e6.next(); b.excludeRoute(android.net.IpPrefix(InetAddress.getByName(r.address()), r.prefix())) }
             } else {
-                val r4 = options.inet4RouteRange
-                if (r4.hasNext()) while (r4.hasNext()) { val p = r4.next(); builder.addRoute(p.address(), p.prefix()) } else builder.addRoute("0.0.0.0", 0)
-                val r6 = options.inet6RouteRange
-                while (r6.hasNext()) { val p = r6.next(); builder.addRoute(p.address(), p.prefix()) }
+                val r4 = options.inet4RouteRange; while (r4.hasNext()) { val r = r4.next(); b.addRoute(r.address(), r.prefix()) }
+                val r6 = options.inet6RouteRange; while (r6.hasNext()) { val r = r6.next(); b.addRoute(r.address(), r.prefix()) }
             }
         }
-        val include = options.includePackage
-        while (include.hasNext()) runCatching { builder.addAllowedApplication(include.next()) }
-        val exclude = options.excludePackage
-        while (exclude.hasNext()) runCatching { builder.addDisallowedApplication(exclude.next()) }
-        val pfd = builder.establish() ?: error("android: VPN establish failed")
-        tunPfd?.close(); tunPfd = pfd
-        return pfd.fd
+        val include = options.includePackage; while (include.hasNext()) runCatching { b.addAllowedApplication(include.next()) }
+        val exclude = options.excludePackage; while (exclude.hasNext()) runCatching { b.addDisallowedApplication(exclude.next()) }
+        val pfd = b.establish() ?: error("android: VPN establish failed"); tunPfd?.close(); tunPfd = pfd; return pfd.fd
     }
-
-    fun sendLibboxNotification(notification: Notification) {
-        val body = notification.body.ifBlank { notification.subtitle }.ifBlank { "AliVPN" }
-        updateNotification(notification.title.ifBlank { "AliVPN" }, body)
-    }
+    fun sendLibboxNotification(n: Notification) { updateNotification(n.title.ifBlank { "AliVPN" }, n.body.ifBlank { n.subtitle }.ifBlank { "AliVPN" }) }
     fun cancelLibboxNotification(identifier: String, typeID: Int) = Unit
     override fun serviceStop() = stopCore("Core requested stop")
     override fun serviceReload() = Unit
-    override fun getSystemProxyStatus(): SystemProxyStatus = SystemProxyStatus().apply { available = false; enabled = false }
+    override fun getSystemProxyStatus() = SystemProxyStatus().apply { available = false; enabled = false }
     override fun setSystemProxyEnabled(enabled: Boolean) = Unit
     override fun triggerNativeCrash() = error("Native crash not supported")
     override fun writeDebugMessage(message: String) { Log.d(TAG, message) }
