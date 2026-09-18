@@ -4,7 +4,6 @@ import android.app.Application
 import android.util.Log
 import io.nekohasekai.libbox.Libbox
 import io.nekohasekai.libbox.SetupOptions
-import java.io.File
 import java.util.Locale
 
 class AliVpnApplication : Application() {
@@ -23,7 +22,6 @@ class AliVpnApplication : Application() {
                 it.logMaxLines = 2000
                 it.debug = BuildConfig.DEBUG
             })
-            Libbox.redirectStderr(File(working, "libbox-stderr.log").absolutePath)
         } catch (t: Throwable) {
             Log.e("AliVPN", "libbox setup failed", t)
         }
