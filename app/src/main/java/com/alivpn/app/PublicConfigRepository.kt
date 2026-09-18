@@ -25,9 +25,8 @@ class PublicConfigRepository {
         var lastError: Throwable? = null
         for (source in SOURCES) {
             try {
-                val body = download(source)
-                val decoded = decodeSubscriptionIfNeeded(body)
-                for (line in decoded.lineSequence()) {
+                val body = decodeSubscriptionIfNeeded(download(source))
+                for (line in body.lineSequence()) {
                     val node = UriNodeParser.parse(line) ?: continue
                     val key = canonical(node.uri)
                     if (!all.containsKey(key)) all[key] = node
@@ -66,10 +65,13 @@ class PublicConfigRepository {
     }
 
     private fun decodeSubscriptionIfNeeded(body: String): String {
-        val lines = body.lineSequence().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
-        if (lines.any { it.startsWith("vless://", true) || it.startsWith("vmess://", true) || it.startsWith("trojan://", true) || it.startsWith("ss://", true) || it.startsWith("socks5://", true) || it.startsWith("http://", true) }) {
-            return lines.joinToString("\n")
-        }
+        val lines = body.lineSequence().map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") }.toList()
+        if (lines.any { line ->
+                line.startsWith("vless://", true) || line.startsWith("vmess://", true) ||
+                    line.startsWith("trojan://", true) || line.startsWith("ss://", true) ||
+                    line.startsWith("socks5://", true) || line.startsWith("http://", true)
+            }) return lines.joinToString("\n")
         return runCatching {
             String(android.util.Base64.decode(body.replace(Regex("\\s"), ""), android.util.Base64.DEFAULT), Charsets.UTF_8)
         }.getOrDefault(body)
