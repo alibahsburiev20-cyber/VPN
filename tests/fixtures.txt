@@ -1,0 +1,7 @@
+# Parsing fixtures (synthetic credentials/endpoints; not live servers)
+vless://11111111-1111-1111-1111-111111111111@example.com:443?security=tls&sni=example.com&type=ws&path=%2Fedge&host=example.com#TLS-WEBSOCKET
+trojan://password@example.com:443?security=tls&sni=example.com#Trojan-TLS
+ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ@192.0.2.10:8388#SS
+vmess://eyJhZGQiOiJleGFtcGxlLmNvbSIsInBvcnQiOiI0NDMiLCJpZCI6IjExMTExMTExLTExMTEtMTExMS0xMTExLTExMTExMTExMTExMSIsImFpZCI6IjAiLCJuZXQiOiJ3cyIsInBhdGgiOiIvIiwiaG9zdCI6ImV4YW1wbGUuY29tIiwidGxzIjoidGxzIiwicHMiOiJWTUVTUyJ9
+socks5://user:pass@example.com:1080#SOCKS
+http://user:pass@example.com:8080#HTTP
