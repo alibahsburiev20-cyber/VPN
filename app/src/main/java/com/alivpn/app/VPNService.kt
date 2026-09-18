@@ -114,9 +114,7 @@ class VPNService : VpnService(), CommandServerHandler {
             delay(90_000)
             if (!scope.isActive || !running.get()) return
             val ip = runCatching { fetchExternalIp() }.getOrDefault("")
-            if (ip.isNotBlank()) {
-                continue
-            }
+            if (ip.isNotBlank()) continue
             broadcast(AppState.CONNECTING, node = lastConnectedNode, detail = "Переподключение…")
             runCatching { server.closeService() }
             connectBest(server)
@@ -156,10 +154,7 @@ class VPNService : VpnService(), CommandServerHandler {
         super.onDestroy()
     }
 
-    override fun onBind(intent: Intent): IBinder? {
-        val binder = super.onBind(intent)
-        return binder
-    }
+    override fun onBind(intent: Intent): IBinder? = super.onBind(intent)
 
     private fun stopCore(reason: String) {
         if (!running.compareAndSet(true, false)) return
@@ -229,7 +224,6 @@ class VPNService : VpnService(), CommandServerHandler {
             val address = inet4.next()
             builder.addAddress(address.address(), address.prefix())
         }
-
         val inet6 = options.inet6Address
         while (inet6.hasNext()) {
             val address = inet6.next()
@@ -237,7 +231,9 @@ class VPNService : VpnService(), CommandServerHandler {
         }
 
         if (options.autoRoute) {
-            builder.addDnsServer(options.dnsServerAddress)
+            val dns = options.dnsServerAddress
+            val dnsAddress = InetAddress.getByName(dns)
+            builder.addDnsServer(dnsAddress)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val r4 = options.inet4RouteAddress
@@ -248,33 +244,29 @@ class VPNService : VpnService(), CommandServerHandler {
                     addedV4Route = true
                 }
                 if (!addedV4Route) builder.addRoute("0.0.0.0", 0)
-
                 val r6 = options.inet6RouteAddress
                 while (r6.hasNext()) {
                     val route = r6.next()
                     builder.addRoute(route.address(), route.prefix())
                 }
-
                 val e4 = options.inet4RouteExcludeAddress
                 while (e4.hasNext()) {
                     val route = e4.next()
-                    val prefix = android.net.IpPrefix(InetAddress.getByName(route.address()), route.prefix())
-                    builder.excludeRoute(prefix)
+                    builder.excludeRoute(android.net.IpPrefix(InetAddress.getByName(route.address()), route.prefix()))
                 }
-
                 val e6 = options.inet6RouteExcludeAddress
                 while (e6.hasNext()) {
                     val route = e6.next()
-                    val prefix = android.net.IpPrefix(InetAddress.getByName(route.address()), route.prefix())
-                    builder.excludeRoute(prefix)
+                    builder.excludeRoute(android.net.IpPrefix(InetAddress.getByName(route.address()), route.prefix()))
                 }
             } else {
                 val r4 = options.inet4RouteRange
-                if (r4.hasNext()) while (r4.hasNext()) {
-                    val p = r4.next()
-                    builder.addRoute(p.address(), p.prefix())
+                if (r4.hasNext()) {
+                    while (r4.hasNext()) {
+                        val p = r4.next()
+                        builder.addRoute(p.address(), p.prefix())
+                    }
                 } else builder.addRoute("0.0.0.0", 0)
-
                 val r6 = options.inet6RouteRange
                 while (r6.hasNext()) {
                     val p = r6.next()
@@ -301,10 +293,7 @@ class VPNService : VpnService(), CommandServerHandler {
 
     fun cancelLibboxNotification(identifier: String, typeID: Int) = Unit
 
-    override fun serviceStop() {
-        stopCore("Core requested stop")
-    }
-
+    override fun serviceStop() = stopCore("Core requested stop")
     override fun serviceReload() = Unit
     override fun getSystemProxyStatus(): SystemProxyStatus = SystemProxyStatus().apply {
         available = false
