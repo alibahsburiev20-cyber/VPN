@@ -43,6 +43,7 @@ class VPNService : VpnService(), CommandServerHandler {
     private var candidates: List<String> = emptyList()
     private var currentNodeIndex = -1
     private var lastConnectedNode: String = ""
+
     private val platform = object : PlatformInterfaceWrapper(this) {}
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -75,45 +76,71 @@ class VPNService : VpnService(), CommandServerHandler {
         val max = minOf(candidates.size, 12)
         var lastError = "unknown"
         for (i in 0 until max) {
-            if (!scope.isActive) return
+            if (!scope.isActive || !running.get()) return
             currentNodeIndex = i
             val uri = candidates[i]
             val name = runCatching { UriNodeParser.parse(uri)?.name ?: "Node ${i + 1}" }.getOrDefault("Node ${i + 1}")
             updateNotification("Проверка узла ${i + 1}/$max", name)
-            broadcast(AppState.CONNECTING, node = name, detail = "Проверка ${i + 1}/$max")
+            broadcast(AppState.CONNECTING, node = name, detail = "Запуск узла ${i + 1}/$max")
             try {
                 val config = SingBoxConfig.build(uri)
                 io.nekohasekai.libbox.Libbox.checkConfig(config)
                 server.startOrReloadService(config, OverrideOptions().also { it.autoRedirect = false })
-                delay(1_800)
-                val ip = fetchExternalIp()
-                if (ip.isNotBlank()) {
-                    lastConnectedNode = name
-                    getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit().putString(AppState.LAST_URI, uri).apply()
-                    broadcast(AppState.CONNECTED, ip = ip, node = name, detail = "Tunnel OK")
-                    updateNotification("VPN подключён", "$name • $ip")
-                    monitorJob?.cancel()
-                    monitorJob = scope.launch { monitorConnection(server) }
-                    return
-                }
-                lastError = "external IP check failed"
-                server.closeService()
+
+                // Starting libbox is the connection event. Do not tear down a working
+                // tunnel just because an external IP endpoint is slow or unavailable.
+                delay(4_000)
+                lastConnectedNode = name
+                getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit()
+                    .putString(AppState.LAST_URI, uri).apply()
+                broadcast(AppState.CONNECTED, node = name, detail = "Tunnel запущен")
+                updateNotification("VPN подключён", name)
+
+                monitorJob?.cancel()
+                monitorJob = scope.launch { monitorConnection(server) }
+                scope.launch { publishExternalIpWhenAvailable(name) }
+                return
             } catch (t: Throwable) {
                 lastError = t.message ?: t.javaClass.simpleName
                 Log.w(TAG, "node $i failed: $uri", t)
                 runCatching { server.closeService() }
+                delay(500)
             }
         }
-        fail("Не удалось подключить ни один узел: $lastError")
+        fail("Не удалось запустить ни один узел: $lastError")
+    }
+
+    private suspend fun publishExternalIpWhenAvailable(node: String) {
+        repeat(5) {
+            if (!running.get()) return
+            val ip = runCatching { fetchExternalIp() }.getOrDefault("")
+            if (ip.isNotBlank()) {
+                broadcast(AppState.CONNECTED, ip = ip, node = node, detail = "Tunnel OK")
+                updateNotification("VPN подключён", "$node • $ip")
+                return
+            }
+            delay(2_000)
+        }
     }
 
     private suspend fun monitorConnection(server: CommandServer) {
+        var failedChecks = 0
         while (scope.isActive && running.get()) {
             delay(90_000)
             if (!scope.isActive || !running.get()) return
-            if (runCatching { fetchExternalIp() }.getOrDefault("").isNotBlank()) continue
-            broadcast(AppState.CONNECTING, node = lastConnectedNode, detail = "Переподключение…")
+            val ip = runCatching { fetchExternalIp() }.getOrDefault("")
+            if (ip.isNotBlank()) {
+                failedChecks = 0
+                broadcast(AppState.CONNECTED, ip = ip, node = lastConnectedNode, detail = "Tunnel OK")
+                continue
+            }
+            failedChecks++
+            Log.w(TAG, "external IP check failed ($failedChecks/3)")
+            if (failedChecks < 3) continue
+
+            broadcast(AppState.CONNECTING, node = lastConnectedNode, detail = "Проверка соединения…")
             runCatching { server.closeService() }
+            failedChecks = 0
             connectBest(server)
             return
         }
@@ -158,7 +185,8 @@ class VPNService : VpnService(), CommandServerHandler {
     }
 
     private fun fail(message: String) {
-        getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit().putString(AppState.STATE, AppState.FAILED).putString(AppState.IP, "").putString(AppState.NODE, "").apply()
+        getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit()
+            .putString(AppState.STATE, AppState.FAILED).putString(AppState.IP, "").putString(AppState.NODE, "").apply()
         broadcast(AppState.FAILED, detail = message)
         updateNotification("AliVPN", "Не удалось подключиться")
         running.set(false)
@@ -175,7 +203,8 @@ class VPNService : VpnService(), CommandServerHandler {
     }
 
     private fun broadcast(state: String, ip: String = "", node: String = "", detail: String = "") {
-        getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit().putString(AppState.STATE, state).putString(AppState.IP, ip).putString(AppState.NODE, node).apply()
+        getSharedPreferences(AppState.PREFS, MODE_PRIVATE).edit()
+            .putString(AppState.STATE, state).putString(AppState.IP, ip).putString(AppState.NODE, node).apply()
         sendBroadcast(Intent(ACTION_STATUS).setPackage(packageName).also {
             it.putExtra(EXTRA_STATE, state); it.putExtra(EXTRA_IP, ip); it.putExtra(EXTRA_NODE, node); it.putExtra(EXTRA_DETAIL, detail)
         })
@@ -196,7 +225,10 @@ class VPNService : VpnService(), CommandServerHandler {
 
         if (options.autoRoute) {
             val dns = options.dnsServerAddress
-            while (dns.hasNext()) builder.addDnsServer(InetAddress.getByName(dns.next()))
+            while (dns.hasNext()) {
+                val value = dns.next()
+                if (value.isNotBlank()) builder.addDnsServer(InetAddress.getByName(value))
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val r4 = options.inet4RouteAddress
                 var addedV4Route = false
